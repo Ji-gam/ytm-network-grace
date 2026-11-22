@@ -8,7 +8,7 @@
 
 ## 동작
 
-`.github/workflows/build.yml`이 매일 1회(UTC 03:23) 또는 수동으로 실행됩니다.
+`.github/workflows/build.yml`이 매주 토요일 오전 3시경(KST, 금요일 18:07 UTC) 또는 수동으로 실행됩니다.
 
 1. seo-rii의 최신 릴리스 태그를 조회합니다. 이 저장소에 `<태그>-crossfade` 릴리스(예: `v2.2.0-crossfade`)가 이미 있으면 종료합니다.
 2. seo-rii를 그 태그로 checkout하고 `scripts/find-base-commit.py`로 공식 기준 커밋을 찾습니다. 문서(`README.md`, `docs/wireguard-source-build.md`)와 패치 헤더(`README-WIREGUARD.md`)의 커밋 후보 중, 공식 저장소에서 받을 수 있고 패치의 모든 원본 blob(`index` 줄)과 일치하는 것이 **정확히 하나**일 때만 채택합니다. 못 찾으면 실패합니다.

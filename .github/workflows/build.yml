@@ -2,7 +2,7 @@ name: build
 
 on:
   schedule:
-    - cron: "23 3 * * *"
+    - cron: "7 18 * * 5"
   workflow_dispatch:
     inputs:
       force:
