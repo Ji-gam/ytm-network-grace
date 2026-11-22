@@ -172,7 +172,7 @@ jobs:
           built=(morphe-patches/patches/build/libs/patches-*.mpp)
           [ "${#built[@]}" -eq 1 ] || { echo "expected one .mpp, got: ${built[*]}" >&2; exit 1; }
           mkdir out
-          name="morphe-wireguard-crossfade-$VERSION.mpp"
+          name="ytm-network-grace-$VERSION.mpp"
           cp "${built[0]}" "out/$name"
           listing="$(unzip -Z1 "out/$name")"
           for entry in classes.dex wireguard/arm64-v8a/libmorphewireguard.so \

@@ -1,4 +1,6 @@
-# morphe-wireguard-crossfade
+# ytm-network-grace
+
+> 비공식 개인용 빌드입니다. MorpheApp, seo-rii와 무관하며 공식 제품이 아닙니다.
 
 [seo-rii/morphe-wireguard-patches](https://github.com/seo-rii/morphe-wireguard-patches)(공식 Morphe에 앱 전용 WireGuard를 넣은 비공식 패치)의 새 릴리스가 나올 때마다, 거기에 **크로스페이드 네트워크 유예** 패치를 얹어 `.mpp` 번들을 빌드하고 이 저장소의 릴리스로 올리는 개인용 자동화입니다.
 
@@ -12,7 +14,7 @@
 2. seo-rii를 그 태그로 checkout하고 `scripts/find-base-commit.py`로 공식 기준 커밋을 찾습니다. 문서(`README.md`, `docs/wireguard-source-build.md`)와 패치 헤더(`README-WIREGUARD.md`)의 커밋 후보 중, 공식 저장소에서 받을 수 있고 패치의 모든 원본 blob(`index` 줄)과 일치하는 것이 **정확히 하나**일 때만 채택합니다. 못 찾으면 실패합니다.
 3. 공식 `MorpheApp/morphe-patches`를 그 커밋으로 checkout하고 `wireguard-prototype.patch` → `patches/crossfade-network-grace.patch`(`git apply --3way`) 순으로 적용합니다.
 4. seo-rii 빌드 스크립트가 고정한 Go·NDK 버전과 JDK 21을 설치하고, 문서의 공개 소스 경로(GitHub Packages 토큰 불필요)로 네이티브 `.so`와 `.mpp`를 빌드합니다.
-5. `morphe-wireguard-crossfade-<버전>.mpp`와 `.sha256`을 릴리스로 올립니다. 릴리스 노트에 seo-rii 태그/커밋, 공식 기준 커밋, 크로스페이드 패치 적용 사실이 적힙니다.
+5. `ytm-network-grace-<버전>.mpp`와 `.sha256`을 릴리스로 올립니다. 릴리스 노트에 seo-rii 태그/커밋, 공식 기준 커밋, 크로스페이드 패치 적용 사실이 적힙니다.
 
 비밀값은 쓰지 않습니다. 기본 `GITHUB_TOKEN`만 사용하고 외부 공개 저장소는 인증 없이 읽습니다.
 
