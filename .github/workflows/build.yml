@@ -1,0 +1,230 @@
+name: build
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even if the release for this tag already exists (replaces it)"
+        type: boolean
+        default: false
+      seo_tag:
+        description: "seo-rii tag to build (empty = latest release)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  SEO_REPO: seo-rii/morphe-wireguard-patches
+  UPSTREAM_REPO: MorpheApp/morphe-patches
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      tag: ${{ steps.decide.outputs.tag }}
+      release: ${{ steps.decide.outputs.release }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+      - id: decide
+        env:
+          INPUT_TAG: ${{ inputs.seo_tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          tag="$INPUT_TAG"
+          if [ -z "$tag" ]; then
+            tag="$(gh api "repos/$SEO_REPO/releases/latest" --jq .tag_name)"
+          fi
+          [ -n "$tag" ] || { echo "could not determine seo-rii tag" >&2; exit 1; }
+          case "$tag" in v*) release="$tag-crossfade" ;; *) release="v$tag-crossfade" ;; esac
+          version="${tag#v}"
+          if gh release view "$release" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            exists=true
+          else
+            exists=false
+          fi
+          if [ "$exists" = true ] && [ "$FORCE" != true ]; then
+            build=false
+            echo "Release $release already exists; nothing to do."
+          else
+            build=true
+          fi
+          {
+            echo "tag=$tag"
+            echo "release=$release"
+            echo "version=$version"
+            echo "build=$build"
+          } >> "$GITHUB_OUTPUT"
+          echo "seo-rii tag: $tag -> our release: $release (build=$build)"
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      RELEASE: ${{ needs.check.outputs.release }}
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - name: Checkout this repo (scripts + crossfade patch)
+        uses: actions/checkout@v5
+
+      - name: Checkout seo-rii at the tag
+        uses: actions/checkout@v5
+        with:
+          repository: seo-rii/morphe-wireguard-patches
+          ref: refs/tags/${{ needs.check.outputs.tag }}
+          path: seo
+          persist-credentials: false
+
+      - name: Find the official base commit
+        id: base
+        run: |
+          set -euo pipefail
+          python3 -I scripts/find-base-commit.py --seo seo \
+            --upstream "https://github.com/$UPSTREAM_REPO.git"
+          echo "seo_commit=$(git -C seo rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout official morphe-patches at the base commit
+        uses: actions/checkout@v5
+        with:
+          repository: MorpheApp/morphe-patches
+          ref: ${{ steps.base.outputs.base_commit }}
+          path: morphe-patches
+          persist-credentials: false
+
+      - name: Apply seo-rii WireGuard patch
+        working-directory: morphe-patches
+        run: |
+          set -euo pipefail
+          git apply --whitespace=nowarn ../seo/wireguard-prototype.patch
+          # Stage so the next --3way apply sees a consistent index.
+          git add -A
+
+      - name: Apply crossfade patch
+        id: crossfade
+        working-directory: morphe-patches
+        run: git apply --3way ../patches/crossfade-network-grace.patch
+
+      - name: Read pinned toolchain versions from seo-rii's build script
+        id: tools
+        working-directory: morphe-patches
+        run: |
+          set -euo pipefail
+          # go.mod only says "go 1.23.1"; the build script enforces the exact toolchain.
+          go_version="$(sed -n 's/^wireguard_go_version="\(.*\)"$/\1/p' scripts/build-wireguard-android.sh)"
+          ndk_version="$(sed -n 's/^wireguard_ndk_version="\(.*\)"$/\1/p' scripts/build-wireguard-android.sh)"
+          [ -n "$go_version" ] && [ -n "$ndk_version" ] || { echo "cannot read versions" >&2; exit 1; }
+          echo "go=$go_version" >> "$GITHUB_OUTPUT"
+          echo "ndk=$ndk_version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ steps.tools.outputs.go }}
+          cache: false
+
+      - name: Install Android SDK packages (NDK from the build script)
+        env:
+          NDK_VERSION: ${{ steps.tools.outputs.ndk }}
+        run: |
+          set -euo pipefail
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses >/dev/null || true
+          "$sdkmanager" --install "platforms;android-36" "build-tools;36.0.0" "ndk;$NDK_VERSION"
+          test -f "$ANDROID_HOME/ndk/$NDK_VERSION/source.properties"
+          # The runner presets ANDROID_NDK_HOME to its own NDK, which the build script prefers.
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+      - name: Fetch pinned public build sources
+        working-directory: morphe-patches
+        run: python3 -I scripts/prepare-wireguard-public-sources.py "$RUNNER_TEMP/public-sources"
+
+      - name: Build bundle (native + Gradle, no credentials)
+        working-directory: morphe-patches
+        env:
+          JAVA_TOOL_OPTIONS: -Dfile.encoding=UTF-8
+        run: |
+          set -euo pipefail
+          bash ./gradlew \
+            --init-script build-support/wireguard-public-sources.init.gradle \
+            "-Dmorphe.publicSources=$RUNNER_TEMP/public-sources" \
+            "-Dmorphe.patchRoot=$PWD" \
+            --no-daemon --max-workers=2 :patches:buildAndroid
+
+      - name: Collect and sanity-check artifact
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          built=(morphe-patches/patches/build/libs/patches-*.mpp)
+          [ "${#built[@]}" -eq 1 ] || { echo "expected one .mpp, got: ${built[*]}" >&2; exit 1; }
+          mkdir out
+          name="morphe-wireguard-crossfade-$VERSION.mpp"
+          cp "${built[0]}" "out/$name"
+          listing="$(unzip -Z1 "out/$name")"
+          for entry in classes.dex wireguard/arm64-v8a/libmorphewireguard.so \
+                       wireguard/x86_64/libmorphewireguard.so extensions/music.mpe; do
+            grep -qx "$entry" <<<"$listing" || { echo "missing $entry in bundle" >&2; exit 1; }
+          done
+          # The crossfade change must really be inside the shipped music extension.
+          unzip -p "out/$name" extensions/music.mpe | grep -aq "Network grace" \
+            || { echo "crossfade code not found in music.mpe" >&2; exit 1; }
+          (cd out && sha256sum "$name" > "$name.sha256" && cat "$name.sha256")
+          ls -l out
+
+      - name: Publish release
+        env:
+          SEO_COMMIT: ${{ steps.base.outputs.seo_commit }}
+          BASE_COMMIT: ${{ steps.base.outputs.base_commit }}
+        run: |
+          set -euo pipefail
+          patch_sha="$(sha256sum patches/crossfade-network-grace.patch | cut -d' ' -f1)"
+          cat > notes.md <<EOF
+          Unofficial build: seo-rii's app-local WireGuard patches + a crossfade network grace patch.
+
+          - seo-rii base: [\`$TAG\`](https://github.com/$SEO_REPO/releases/tag/$TAG) (commit [\`${SEO_COMMIT:0:12}\`](https://github.com/$SEO_REPO/commit/$SEO_COMMIT))
+          - Official base: [MorpheApp/morphe-patches \`${BASE_COMMIT:0:12}\`](https://github.com/$UPSTREAM_REPO/commit/$BASE_COMMIT)
+          - Applied on top: \`wireguard-prototype.patch\` (seo-rii), then \`patches/crossfade-network-grace.patch\` (SHA-256 \`$patch_sha\`) — up to 5 s crossfade network grace while WireGuard is active.
+          - Built by workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          - Unsigned bundle built on GitHub Actions (Linux); not byte-identical to seo-rii's own release. Licensed GPLv3 like upstream.
+          EOF
+          if gh release view "$RELEASE" >/dev/null 2>&1; then
+            gh release delete "$RELEASE" --cleanup-tag --yes
+          fi
+          gh release create "$RELEASE" out/* \
+            --title "$RELEASE" --notes-file notes.md --target "$GITHUB_SHA"
+
+      - name: Open issue if crossfade patch no longer applies
+        if: failure() && steps.crossfade.outcome == 'failure'
+        env:
+          SEO_COMMIT: ${{ steps.base.outputs.seo_commit }}
+          BASE_COMMIT: ${{ steps.base.outputs.base_commit }}
+        run: |
+          set -euo pipefail
+          title="Crossfade patch no longer applies to seo-rii $TAG"
+          existing="$(gh issue list --state open --limit 100 --json number,title \
+            --jq "[.[] | select(.title == \"$title\")] | length")"
+          if [ "$existing" != 0 ]; then
+            echo "Issue already open; not creating a duplicate."
+            exit 0
+          fi
+          gh issue create --title "$title" --body "\`git apply --3way patches/crossfade-network-grace.patch\` failed.
+
+          - seo-rii tag: \`$TAG\` (\`${SEO_COMMIT:-unknown}\`)
+          - Official base commit: \`${BASE_COMMIT:-unknown}\`
+          - Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          Upstream code changed; the patch needs to be rebased by hand (see README, \"패치 충돌 시\")."

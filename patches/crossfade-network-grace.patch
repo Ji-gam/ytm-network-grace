@@ -1,0 +1,332 @@
+diff --git a/extensions/music/src/main/java/app/morphe/extension/music/patches/CrossfadePatch.java b/extensions/music/src/main/java/app/morphe/extension/music/patches/CrossfadePatch.java
+index 69fec4e8f..2c3364fc5 100644
+--- a/extensions/music/src/main/java/app/morphe/extension/music/patches/CrossfadePatch.java
++++ b/extensions/music/src/main/java/app/morphe/extension/music/patches/CrossfadePatch.java
+@@ -38,6 +38,7 @@ import java.util.Locale;
+ import java.util.concurrent.CopyOnWriteArraySet;
+ 
+ import app.morphe.extension.music.settings.Settings;
++import app.morphe.extension.shared.wireguard.WireGuardProxy;
+ import app.morphe.extension.shared.Logger;
+ import app.morphe.extension.shared.Utils;
+ import app.morphe.extension.shared.spoof.SpoofVideoStreamsPatch;
+@@ -324,6 +325,113 @@ public class CrossfadePatch {
+     private static final long AUTO_ADVANCE_TRIGGER_BUFFER_MS = 300;
+     private static final int QUICK_FADE_MS = 400;
+ 
++    /**
++     * Upper bound of the network grace, used for the early auto-advance lead, the READY timeout
++     * extension and the time a fade may be held while the incoming buffers.
++     */
++    private static final long NETWORK_GRACE_MAX_MS = 5000;
++    /**
++     * Assumed trigger-to-READY latency until a real one was measured, so the first transition
++     * behind a tunnel already gets some lead.
++     */
++    private static final long NETWORK_GRACE_INITIAL_LATENCY_MS = 2000;
++    private static final long NETWORK_GRACE_LEAD_MARGIN_MS = 500;
++    private static final int PLAYER_STATE_BUFFERING = 2;
++
++    /**
++     * Isolated so a build without the WireGuard class only fails inside this holder.
++     */
++    private static final class WireGuardProbe {
++        static boolean active() {
++            try {
++                return WireGuardProxy.isEnabled();
++            } catch (Throwable t) {
++                return false;
++            }
++        }
++    }
++
++    /**
++     * 0 when the setting is off or the app does not route through WireGuard, so that case
++     * behaves exactly as before.
++     */
++    private static long networkGraceMs() {
++        try {
++            if (!Settings.CROSSFADE_NETWORK_GRACE.get()) return 0;
++        } catch (Throwable t) {
++            return 0;
++        }
++        return WireGuardProbe.active() ? NETWORK_GRACE_MAX_MS : 0;
++    }
++
++    /**
++     * Slowest recent trigger-to-READY latency, shrinking 25% per transition.
++     */
++    private static volatile long estimatedLoadLatencyMs = NETWORK_GRACE_INITIAL_LATENCY_MS;
++    private static volatile long autoAdvanceTriggerTimeMs = 0;
++    private static volatile boolean graceBufferingLogged = false;
++    /**
++     * Fades stop advancing while the incoming is BUFFERING, for at most the grace per crossfade.
++     * The accumulator only grows, each fade subtracts what accrued since it started.
++     */
++    private static long fadeHoldAccumMs = 0;
++    private static long fadeHoldTotalMs = 0;
++    private static long fadeHoldLastTickMs = 0;
++    private static boolean fadeHoldActive = false;
++
++    private static void updateFadeHold(ExoPlayerAccess incoming) {
++        long now = System.currentTimeMillis();
++        long last = fadeHoldLastTickMs;
++        fadeHoldLastTickMs = now;
++        long grace = networkGraceMs();
++        if (grace <= 0 || last == 0) return;
++
++        boolean bufferingNow = false;
++        try {
++            bufferingNow = incoming.patch_getPlaybackState() == PLAYER_STATE_BUFFERING;
++        } catch (Exception ignored) {}
++        final boolean buffering = bufferingNow;
++
++        if (buffering && fadeHoldTotalMs < grace) {
++            long delta = Math.min(now - last, grace - fadeHoldTotalMs);
++            fadeHoldTotalMs += delta;
++            fadeHoldAccumMs += delta;
++            if (!fadeHoldActive) {
++                fadeHoldActive = true;
++                logInfo(() -> "Network grace: incoming BUFFERING mid-fade, holding fades (budget "
++                        + (grace - fadeHoldTotalMs) + "ms left)");
++            }
++            if (fadeHoldTotalMs >= grace) {
++                logWarn(() -> "Network grace: hold budget " + grace + "ms used up, resuming fades");
++            }
++        } else if (fadeHoldActive) {
++            fadeHoldActive = false;
++            logInfo(() -> "Network grace: incoming " + (buffering ? "still BUFFERING, budget spent"
++                    : "recovered") + ", fades resumed after holding " + fadeHoldTotalMs + "ms");
++        }
++    }
++
++    /**
++     * How much earlier than the usual fade + buffer the monitor starts the next track.
++     */
++    private static long autoAdvanceLeadMs(long durationMs, long baseTriggerMs) {
++        long grace = networkGraceMs();
++        if (grace <= 0) return 0;
++        long lead = Math.min(grace, estimatedLoadLatencyMs + NETWORK_GRACE_LEAD_MARGIN_MS);
++        // A short track must not start its successor before its own midpoint.
++        return Math.max(0, Math.min(lead, durationMs / 2 - baseTriggerMs));
++    }
++
++    private static void recordTriggerToReady() {
++        long start = autoAdvanceTriggerTimeMs;
++        autoAdvanceTriggerTimeMs = 0;
++        if (start <= 0 || networkGraceMs() <= 0) return;
++        long latency = System.currentTimeMillis() - start;
++        estimatedLoadLatencyMs = Math.max(latency, estimatedLoadLatencyMs * 3 / 4);
++        logDebug(() -> "Network grace: trigger->READY " + latency + "ms, estimate now "
++                + estimatedLoadLatencyMs + "ms");
++    }
++
+     private static volatile SharedCallbackAccess activeSharedCallback = null;
+     private static volatile ExoPlayerAccess crossfadeInPlayer = null;
+     private static volatile ExoPlayerAccess pendingInPlayer = null;
+@@ -355,6 +463,15 @@ public class CrossfadePatch {
+         final long startTimeMs;
+         final long fadeDurationMs;
+         final FadeCurve curve;
++        final long holdBaseMs = fadeHoldAccumMs;
++
++        /**
++         * Time spent fading, without the time the fade was held for a buffering incoming.
++         */
++        long elapsedMs() {
++            return Math.max(0, System.currentTimeMillis() - startTimeMs
++                    - (fadeHoldAccumMs - holdBaseMs));
++        }
+ 
+         FadingPlayer(ExoPlayerAccess player, long fadeDurationMs, FadeCurve curve) {
+             this.player = player;
+@@ -376,7 +493,7 @@ public class CrossfadePatch {
+         }
+ 
+         float currentVolume() {
+-            long elapsed = System.currentTimeMillis() - startTimeMs;
++            long elapsed = elapsedMs();
+             float t = Math.min(1.0f, (float) elapsed / fadeDurationMs);
+             if (curve != null) {
+                 return curve.out(t);
+@@ -385,7 +502,7 @@ public class CrossfadePatch {
+         }
+ 
+         boolean isComplete() {
+-            return System.currentTimeMillis() - startTimeMs >= fadeDurationMs;
++            return elapsedMs() >= fadeDurationMs;
+         }
+     }
+ 
+@@ -592,7 +709,13 @@ public class CrossfadePatch {
+             }
+ 
+             if (isAutoAdvance && outgoingWasPlaying) {
+-                outgoingAwaitingLoad = currentExo;
++                if (networkGraceMs() > 0) {
++                    // Held at full volume until the incoming is READY, then faded over what is left.
++                    logDebug(() -> "Network grace: holding outgoing fade-out until incoming READY @"
++                            + System.identityHashCode(currentExo));
++                } else {
++                    outgoingAwaitingLoad = currentExo;
++                }
+             }
+ 
+             pollForNewTrackReady(newExo);
+@@ -1048,8 +1171,11 @@ public class CrossfadePatch {
+     private static volatile boolean pendingLoadIssued = false;
+ 
+     private static void pollForNewTrackReady(final ExoPlayerAccess newPlayer) {
+-        final long deadline = System.currentTimeMillis() + READY_TIMEOUT_MS;
++        final long graceMs = networkGraceMs();
++        final long deadline = System.currentTimeMillis() + READY_TIMEOUT_MS + graceMs;
++        final long pollStartMs = System.currentTimeMillis();
+         lastPollState = -1;
++        graceBufferingLogged = false;
+         pollIdleStreakStartMs = 0;
+         pendingLoadIssued = false;
+ 
+@@ -1096,6 +1222,15 @@ public class CrossfadePatch {
+                         lastPollState = state;
+                     }
+ 
++                    if (graceMs > 0 && !graceBufferingLogged
++                            && System.currentTimeMillis() - pollStartMs >= IDLE_LOAD_FAIL_MS) {
++                        graceBufferingLogged = true;
++                        logDebug(() -> "Network grace: pending player not READY after "
++                                + IDLE_LOAD_FAIL_MS + "ms (state=" + state + " loadIssued="
++                                + pendingLoadIssued + "), waiting up to "
++                                + (READY_TIMEOUT_MS + graceMs) + "ms");
++                    }
++
+                     // A slow or failed stream, not a crossfade error, so no error toast (#1949).
+                     if (System.currentTimeMillis() > deadline) {
+                         logWarn(() -> "Timeout waiting for new track " + dumpState());
+@@ -1180,6 +1315,7 @@ public class CrossfadePatch {
+     }
+ 
+     private static void onPendingPlayerReady(ExoPlayerAccess newPlayer) {
++        recordTriggerToReady();
+         FadeCurve curve = Settings.CROSSFADE_CURVE.get();
+         long fadeDuration = getCrossfadeDurationMs();
+ 
+@@ -1331,9 +1467,16 @@ public class CrossfadePatch {
+                         return;
+                     }
+ 
+-                    if (remaining <= fadeDuration + AUTO_ADVANCE_TRIGGER_BUFFER_MS && remaining > 0) {
++                    final long baseTrigger = fadeDuration + AUTO_ADVANCE_TRIGGER_BUFFER_MS;
++                    final long leadMs = autoAdvanceLeadMs(dur, baseTrigger);
++                    if (remaining <= baseTrigger + leadMs && remaining > 0) {
+                         logDebug(() -> "Auto-advance: monitor trigger at remaining=" + remaining
+                                                 + "ms (fadeDuration=" + fadeDuration + "ms)");
++                        if (leadMs > 0) {
++                            autoAdvanceTriggerTimeMs = System.currentTimeMillis();
++                            logInfo(() -> "Network grace: starting next track " + leadMs
++                                    + "ms early (estimate " + estimatedLoadLatencyMs + "ms)");
++                        }
+                         stopAutoAdvanceMonitor();
+ 
+                         // MEDIA_NEXT ignores repeat-one. If the self crossfade cannot start,
+@@ -1433,7 +1576,11 @@ public class CrossfadePatch {
+ 
+             currentExo.patch_setPlayWhenReady(true);
+             currentExo.patch_setVolume(1.0f);
+-            outgoingAwaitingLoad = currentExo;
++            if (networkGraceMs() > 0) {
++                logDebug(() -> "Network grace: holding outgoing fade-out until incoming READY (repeat-single)");
++            } else {
++                outgoingAwaitingLoad = currentExo;
++            }
+ 
+             logInfo(() -> "repeat-single: re-issuing loadVideo (same song) onto @"
+                     + System.identityHashCode(newExo) + " descriptor=@"
+@@ -1517,6 +1664,10 @@ public class CrossfadePatch {
+         outgoingFadePreStarted = false;
+         outgoingAwaitingLoad = null;
+         currentFadeInVolume = 0.0f;
++        autoAdvanceTriggerTimeMs = 0;
++        fadeHoldTotalMs = 0;
++        fadeHoldLastTickMs = 0;
++        fadeHoldActive = false;
+     }
+ 
+     private static void animateCrossfade(final ExoPlayerAccess inPlayer, final long durationOverrideMs) {
+@@ -1534,6 +1685,7 @@ public class CrossfadePatch {
+         playerIsPlaying = true;
+ 
+         final long startTime = System.currentTimeMillis();
++        final long holdBase = fadeHoldAccumMs;
+         final long duration = (durationOverrideMs > 0) ? durationOverrideMs : getCrossfadeDurationMs();
+ 
+         logDebug(() -> "Crossfade fade-in started for @" + System.identityHashCode(inPlayer)
+@@ -1546,7 +1698,9 @@ public class CrossfadePatch {
+                 if (!crossfadeInProgress) return;
+                 if (inPlayer != crossfadeInPlayer) return;
+ 
+-                long elapsed = System.currentTimeMillis() - startTime;
++                updateFadeHold(inPlayer);
++                long elapsed = Math.max(0, System.currentTimeMillis() - startTime
++                        - (fadeHoldAccumMs - holdBase));
+                 float t = Math.min(1.0f, (float) elapsed / duration);
+ 
+                 FadeCurve curve = Settings.CROSSFADE_CURVE.get();
+@@ -1808,7 +1962,7 @@ public class CrossfadePatch {
+                 try { playerState = fp.player.patch_getPlaybackState(); } catch (Exception ignored) {}
+                 try {
+                     fp.player.patch_setVolume(Math.max(0.0f, vol));
+-                    long elapsed = System.currentTimeMillis() - fp.startTimeMs;
++                    long elapsed = fp.elapsedMs();
+                     if (elapsed % 500 < TICK_MS) {
+                         final int playerStateFinal = playerState;
+                         logDebug(() -> String.format(Locale.US,
+diff --git a/extensions/music/src/main/java/app/morphe/extension/music/settings/Settings.java b/extensions/music/src/main/java/app/morphe/extension/music/settings/Settings.java
+index b8d3a476d..99ad7ee72 100644
+--- a/extensions/music/src/main/java/app/morphe/extension/music/settings/Settings.java
++++ b/extensions/music/src/main/java/app/morphe/extension/music/settings/Settings.java
+@@ -180,6 +180,7 @@ public class Settings extends SharedYouTubeSettings {
+     public static final EnumSetting<CrossFadeDuration> CROSSFADE_DURATION = new EnumSetting<>("morphe_music_crossfade_duration", CrossFadeDuration.MILLISECONDS_3000, parent(CROSSFADE_ENABLED));
+     public static final BooleanSetting CROSSFADE_ON_SKIP = new BooleanSetting("morphe_music_crossfade_on_skip", TRUE, parent(CROSSFADE_ENABLED));
+     public static final BooleanSetting CROSSFADE_ON_AUTO_ADVANCE = new BooleanSetting("morphe_music_crossfade_on_auto_advance", TRUE, parent(CROSSFADE_ENABLED));
++    public static final BooleanSetting CROSSFADE_NETWORK_GRACE = new BooleanSetting("morphe_music_crossfade_network_grace", TRUE, parent(CROSSFADE_ENABLED));
+     public static final BooleanSetting CROSSFADE_SESSION_CONTROL = new BooleanSetting("morphe_music_crossfade_session_control", TRUE, parent(CROSSFADE_ENABLED));
+ 
+     // Miscellaneous
+diff --git a/patches/src/main/kotlin/app/morphe/patches/music/interaction/crossfade/CrossfadePatch.kt b/patches/src/main/kotlin/app/morphe/patches/music/interaction/crossfade/CrossfadePatch.kt
+index df682a845..dca802a6d 100644
+--- a/patches/src/main/kotlin/app/morphe/patches/music/interaction/crossfade/CrossfadePatch.kt
++++ b/patches/src/main/kotlin/app/morphe/patches/music/interaction/crossfade/CrossfadePatch.kt
+@@ -174,6 +174,7 @@ val crossfadePatch = patch(
+                     ListPreference("morphe_music_crossfade_duration"),
+                     SwitchPreference("morphe_music_crossfade_on_skip", summary = true),
+                     SwitchPreference("morphe_music_crossfade_on_auto_advance", summary = true),
++                    SwitchPreference("morphe_music_crossfade_network_grace", summary = true),
+                     SwitchPreference("morphe_music_crossfade_session_control", summary = true),
+                     screenInfoPreferenceCategory(
+                         key = "morphe_music_crossfade_about",
+diff --git a/patches/src/main/resources/addresources/values-ko-rKR/music/strings.xml b/patches/src/main/resources/addresources/values-ko-rKR/music/strings.xml
+index af1b55b41..c7394e57a 100644
+--- a/patches/src/main/resources/addresources/values-ko-rKR/music/strings.xml
++++ b/patches/src/main/resources/addresources/values-ko-rKR/music/strings.xml
+@@ -302,6 +302,8 @@ Second \"item\" text"</string>
+   <string name="morphe_music_crossfade_on_auto_advance_summary">트랙이 자연스럽게 종료될 경우에 크로스페이드 효과를 적용합니다</string>
+   <string name="morphe_music_crossfade_session_control_title">세션 제어</string>
+   <string name="morphe_music_crossfade_session_control_summary">셔플 버튼을 길게 탭하여 크로스페이드를 일시 중지하거나 다시 실행할 수 있습니다</string>
++  <string name="morphe_music_crossfade_network_grace_title">크로스페이드 네트워크 유예</string>
++  <string name="morphe_music_crossfade_network_grace_summary">WireGuard 사용 시 자동 넘김을 더 일찍 시작하고, 다음 트랙이 버퍼링되는 동안 페이드를 멈춰 연결이 느려도 소리가 끊기지 않게 합니다</string>
+   <string name="morphe_music_crossfade_paused_toast">이 세션에서 크로스페이드를 일시 중지하였습니다</string>
+   <string name="morphe_music_crossfade_resumed_toast">크로스페이드를 다시 시작하였습니다</string>
+   <string name="morphe_music_crossfade_video_mode_disabled_toast">크로스페이드가 활성화된 동안에는 동영상 모드를 사용할 수 없습니다</string>
+diff --git a/patches/src/main/resources/addresources/values/music/strings.xml b/patches/src/main/resources/addresources/values/music/strings.xml
+index f21126b80..57f1e41db 100644
+--- a/patches/src/main/resources/addresources/values/music/strings.xml
++++ b/patches/src/main/resources/addresources/values/music/strings.xml
+@@ -324,6 +324,8 @@ They are downloaded one at a time, which can take a long time and needs about %3
+     <string name="morphe_music_crossfade_on_auto_advance_summary">Applies the crossfade effect when a track ends naturally</string>
+     <string name="morphe_music_crossfade_session_control_title">Session control</string>
+     <string name="morphe_music_crossfade_session_control_summary">Long-press the shuffle button to pause or resume crossfade</string>
++    <string name="morphe_music_crossfade_network_grace_title">Crossfade network grace</string>
++    <string name="morphe_music_crossfade_network_grace_summary">When using WireGuard, starts auto-advance earlier and holds the fade while the next track buffers, so a slow connection does not cause silent gaps</string>
+     <string name="morphe_music_crossfade_paused_toast">Crossfade paused for this session</string>
+     <string name="morphe_music_crossfade_resumed_toast">Crossfade resumed</string>
+     <string name="morphe_music_crossfade_video_mode_disabled_toast">Video mode is not available while crossfade is enabled</string>
