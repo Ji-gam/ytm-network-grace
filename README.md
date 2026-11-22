@@ -43,7 +43,7 @@ gh run watch
 
 ## Morphe Manager에서 쓰기
 
-이 저장소는 **비공개**라서 Morphe Manager의 Remote 패치 소스로 등록할 수 없습니다. 릴리스 페이지(또는 `gh release download <태그>-crossfade`)에서 `.mpp`를 받아 Manager에 **로컬 번들로 직접 추가**하세요. `.sha256`으로 무결성을 확인할 수 있습니다.
+공개 저장소이므로 Morphe Manager의 Remote 패치 소스로 등록할 수 있는지 Manager 쪽 형식 요구를 확인해 보세요. 가장 확실한 방법은 릴리스 페이지(또는 `gh release download <태그>-crossfade`)에서 `.mpp`를 받아 Manager에 **로컬 번들로 직접 추가**하는 것입니다. `.sha256`으로 무결성을 확인할 수 있습니다.
 
 빌드는 서명되지 않은 번들이며, GitHub Actions(Linux)에서 빌드하므로 seo-rii의 공식 릴리스와 바이트 단위로 같지 않습니다.
 
