@@ -207,6 +207,17 @@ jobs:
           gh release create "$RELEASE" out/* \
             --title "$RELEASE" --notes-file notes.md --target "$GITHUB_SHA"
 
+      - name: Update patches-bundle.json (Morphe Manager Remote source)
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B main origin/main
+          jq -n --arg created "$(date -u +%Y-%m-%dT%H:%M:%S)"                 --arg desc "Unofficial build: seo-rii WireGuard patches ($TAG) + crossfade network grace for YouTube Music."                 --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$RELEASE/ytm-network-grace-$VERSION.mpp"                 --arg ver "$VERSION"                 '{created_at:$created, description:$desc, download_url:$url, signature_download_url:"", version:$ver}'                 > patches-bundle.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add patches-bundle.json
+          git diff --cached --quiet || { git commit -m "Update patches-bundle.json for $RELEASE"; git push origin main; }
+
       - name: Open issue if crossfade patch no longer applies
         if: failure() && steps.crossfade.outcome == 'failure'
         env:

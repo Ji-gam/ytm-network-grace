@@ -1,0 +1,7 @@
+{
+  "created_at": "2026-11-22T06:00:42",
+  "description": "Unofficial build: seo-rii app-local WireGuard patches (v2.2.0) + crossfade network grace for YouTube Music. Based on official Morphe Patches v2.2.0.",
+  "download_url": "https://github.com/Ji-gam/ytm-network-grace/releases/download/v2.2.0-crossfade/ytm-network-grace-2.2.0.mpp",
+  "signature_download_url": "",
+  "version": "2.2.0"
+}
