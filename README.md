@@ -12,7 +12,7 @@
 
 1. seo-rii의 최신 릴리스 태그를 조회합니다. 이 저장소에 `<태그>-crossfade` 릴리스(예: `v2.2.0-crossfade`)가 이미 있으면 종료합니다.
 2. seo-rii를 그 태그로 checkout하고 `scripts/find-base-commit.py`로 공식 기준 커밋을 찾습니다. 문서(`README.md`, `docs/wireguard-source-build.md`)와 패치 헤더(`README-WIREGUARD.md`)의 커밋 후보 중, 공식 저장소에서 받을 수 있고 패치의 모든 원본 blob(`index` 줄)과 일치하는 것이 **정확히 하나**일 때만 채택합니다. 못 찾으면 실패합니다.
-3. 공식 `MorpheApp/morphe-patches`를 그 커밋으로 checkout하고 `wireguard-prototype.patch` → `patches/crossfade-network-grace.patch`(`git apply --3way`) 순으로 적용합니다.
+3. 공식 `MorpheApp/morphe-patches`를 그 커밋으로 checkout하고 `wireguard-prototype.patch` → `patches/crossfade-network-grace.patch`(`git apply --3way`) 순으로 적용합니다. 이어서 `scripts/music-only.py`가 `patch()` 호출을 `music-only/MusicOnlyPatch.kt`로 돌려, YouTube Music·범용이 아닌 패치(YouTube, Reddit)를 이름 없는 패치로 만듭니다. 의존성으로는 그대로 동작하지만 번들 목록에는 Music 패치와 범용 패치만 남습니다(빌드 후 `music-only/MusicOnlyCheck.java`로 검증).
 4. seo-rii 빌드 스크립트가 고정한 Go·NDK 버전과 JDK 21을 설치하고, 문서의 공개 소스 경로(GitHub Packages 토큰 불필요)로 네이티브 `.so`와 `.mpp`를 빌드합니다.
 5. `ytm-network-grace-<버전>.mpp`와 `.sha256`을 릴리스로 올립니다. 릴리스 노트에 seo-rii 태그/커밋, 공식 기준 커밋, 크로스페이드 패치 적용 사실이 적힙니다.
 

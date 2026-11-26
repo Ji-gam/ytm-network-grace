@@ -114,6 +114,9 @@ jobs:
         working-directory: morphe-patches
         run: git apply --3way ../patches/crossfade-network-grace.patch
 
+      - name: Keep only YouTube Music patches
+        run: python3 -I scripts/music-only.py . morphe-patches
+
       - name: Read pinned toolchain versions from seo-rii's build script
         id: tools
         working-directory: morphe-patches
@@ -163,7 +166,7 @@ jobs:
             --init-script build-support/wireguard-public-sources.init.gradle \
             "-Dmorphe.publicSources=$RUNNER_TEMP/public-sources" \
             "-Dmorphe.patchRoot=$PWD" \
-            --no-daemon --max-workers=2 :patches:buildAndroid
+            --no-daemon --max-workers=2 :patches:buildAndroid :patches:verifyWireGuardBundleLoading
 
       - name: Collect and sanity-check artifact
         run: |
@@ -198,6 +201,7 @@ jobs:
           - seo-rii base: [\`$TAG\`](https://github.com/$SEO_REPO/releases/tag/$TAG) (commit [\`${SEO_COMMIT:0:12}\`](https://github.com/$SEO_REPO/commit/$SEO_COMMIT))
           - Official base: [MorpheApp/morphe-patches \`${BASE_COMMIT:0:12}\`](https://github.com/$UPSTREAM_REPO/commit/$BASE_COMMIT)
           - Applied on top: \`wireguard-prototype.patch\` (seo-rii), then \`patches/crossfade-network-grace.patch\` (SHA-256 \`$patch_sha\`) — up to 5 s crossfade network grace while WireGuard is active.
+          - YouTube Music only: YouTube and Reddit patches are hidden from the bundle (\`scripts/music-only.py\`); universal patches stay.
           - Built by workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           - Unsigned bundle built on GitHub Actions (Linux); not byte-identical to seo-rii's own release. Licensed GPLv3 like upstream.
           EOF
